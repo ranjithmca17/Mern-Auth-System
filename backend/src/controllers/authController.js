@@ -5,6 +5,7 @@ const User = require("../models/User");
 const generateAccessToken = require("../utils/generateToken");
 const hashToken = require("../utils/hashToken");
 const generateRefreshToken = require("../utils/generateRefreshToken");
+const sendEmail = require("../utils/sendEmail");
 
 // Register a new user
 const registerUser = async (req, res) => {
@@ -22,7 +23,37 @@ const registerUser = async (req, res) => {
       password: hashedPassword
     });
 
+    const verificationToken = crypto.randomBytes(32).toString("hex");
+
+    const hashedVerificationToken = crypto
+      .createHash("sha256")
+      .update(verificationToken)
+      .digest("hex");
+
+    newUser.emailVerificationToken = hashedVerificationToken;
+    newUser.emailVerificationExpires = Date.now() + 15 * 60 * 1000;
+
     await newUser.save();
+
+    const baseUrl = (process.env.BACKEND_URL || "").replace(/\/$/, "");
+    const verificationUrl = `${baseUrl}/api/auth/verify-email/${verificationToken}`;
+
+    try {
+      await sendEmail({
+        to: newUser.email,
+        subject: "Verify your email",
+        html: `<p>Hello ${newUser.name},</p><p>Please verify your email by clicking the link below:</p><p><a href="${verificationUrl}">Verify Email</a></p><p>This link expires in 15 minutes.</p>`
+      });
+    } catch (error) {
+      newUser.emailVerificationToken = undefined;
+      newUser.emailVerificationExpires = undefined;
+      await newUser.save();
+
+      return res.status(500).json({
+        success: false,
+        message: "Registration failed while sending verification email"
+      });
+    }
 
     res.status(201).json({success: true,
          message: "User registered successfully",
@@ -38,6 +69,47 @@ const registerUser = async (req, res) => {
     console.error(error);
     res.status(500).json({success: false, message: "Server error"});    
 
+  }
+};
+
+const verifyEmail = async (req, res) => {
+  try {
+    const { token } = req.params;
+
+    const hashedToken = crypto
+      .createHash("sha256")
+      .update(token)
+      .digest("hex");
+
+    const user = await User.findOne({
+      emailVerificationToken: hashedToken,
+      emailVerificationExpires: { $gt: Date.now() }
+    }).select("+emailVerificationToken +emailVerificationExpires");
+
+    if (!user) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid or expired verification token"
+      });
+    }
+
+    user.isEmailVerified = true;
+    user.emailVerificationToken = undefined;
+    user.emailVerificationExpires = undefined;
+
+    await user.save();
+
+    return res.status(200).json({
+      success: true,
+      message: "Email verified successfully"
+    });
+  } catch (error) {
+    console.error("Verify email error:", error.message);
+
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error"
+    });
   }
 };
 
@@ -367,4 +439,4 @@ const resetPassword = async (req, res) => {
 };
 
 
-module.exports = { registerUser, loginUser, refreshTokenController, logoutUser,forgotPassword,resetPassword };
+module.exports = { registerUser, verifyEmail, loginUser, refreshTokenController, logoutUser,forgotPassword,resetPassword };
